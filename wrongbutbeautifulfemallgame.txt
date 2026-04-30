@@ -1,0 +1,1208 @@
+final int MAX_E = 100;
+final int MAX_G = 100;
+
+final int INPUT_NONE   = 0;
+final int INPUT_GST    = 1;
+final int INPUT_ECOUNT = 2;
+final int INPUT_SIZE   = 3;
+final int INPUT_MATRIX = 4;
+final int INPUT_DOF    = 5;
+
+App app;
+
+void setup() {
+  fullScreen();
+  textAlign(CENTER, CENTER);
+  textSize(14);
+  app = new App();
+}
+
+void draw() {
+  background(245);
+  app.render();
+}
+
+void mousePressed() {
+  app.handleMouse();
+}
+
+void mouseDragged() {
+  app.handleDrag();
+}
+
+void mouseReleased() {
+  app.handleRelease();
+}
+
+boolean over(float x, float y, float w, float h) {
+  return mouseX > x && mouseX < x + w && mouseY > y && mouseY < y + h;
+}
+
+boolean isPositiveIntString(String s) {
+  if (s == null) return false;
+  s = trim(s);
+  return s.length() > 0 && s.matches("\\d+");
+}
+
+boolean isFloatString(String s) {
+  if (s == null) return false;
+  s = trim(s);
+  if (s.length() == 0) return false;
+  return s.matches("[-+]?(?:\\d*\\.\\d+|\\d+\\.?\\d*)");
+}
+
+class App {
+  Element[] elements;
+  GlobalMatrix G;
+  Keypad keypad;
+
+  int gstN = 0;
+  int elementCount = 0;
+
+  int active = 0;
+  int assemblyActive = -1;
+
+  boolean gstSet = false;
+  boolean settingFinished = false;
+  boolean assembling = false;
+
+  String message = "Enter GST size N (1-100).";
+
+  float btnY = 0;
+
+  App() {
+    elements = new Element[MAX_E];
+    for (int i = 0; i < MAX_E; i++) elements[i] = new Element();
+    G = new GlobalMatrix(MAX_G);
+    keypad = new Keypad();
+    keypad.startGST();
+  }
+
+  void render() {
+    drawTop();
+    drawSelector();
+
+    Element e = getActiveElement();
+    float localCell = computeLocalCell(e);
+    float globalCell = computeGlobalCell();
+
+    drawStageLabel(e);
+
+    if (e != null && e.size > 0) {
+      e.drawLocal(40, 120, localCell, keypad, assembling && active == assemblyActive);
+      float dofY = 120 + e.size * localCell + 45;
+      e.drawDOF(40, dofY, localCell, keypad, assembling && active == assemblyActive);
+    } else {
+      drawEmptyLocalArea();
+    }
+
+    if (gstSet) {
+      G.draw(width * 0.58, 120, globalCell);
+    }
+
+    drawButtons();
+    drawStatus();
+    keypad.draw();
+  }
+
+  void handleMouse() {
+    if (keypad.mousePressed(this)) return;
+
+    if (assembling) {
+      stepAssembly();
+      return;
+    }
+
+    if (over(width - 190, 20, 170, 40)) {
+      keypad.startGST();
+      message = "Enter GST size N (1-100).";
+      return;
+    }
+
+    Element e = getActiveElement();
+
+    if (over(40, btnY, 100, 40)) {
+      if (!gstSet) {
+        message = "Set GST size first.";
+        return;
+      }
+      if (e != null) {
+        keypad.startSize(e);
+        message = "Enter size for Element " + (active + 1) + ".";
+      }
+      return;
+    }
+
+    if (over(155, btnY, 150, 40)) {
+      if (allReady()) {
+        settingFinished = true;
+        assembling = false;
+        assemblyActive = -1;
+        message = "SETTING FINISHED. Click ASSEMBLE.";
+      } else {
+        message = "Complete all inputs first.";
+      }
+      return;
+    }
+
+    if (over(320, btnY, 110, 40)) {
+      if (settingFinished) {
+        assembling = true;
+        assemblyActive = -1;
+        message = "Assembly started.";
+      } else {
+        message = "Finish setting first.";
+      }
+      return;
+    }
+
+    if (e != null && e.size > 0) {
+      if (over(445, btnY, 150, 40)) {
+        e.autoFillMatrix();
+        invalidateAssemblyState();
+        if (!e.dofComplete()) {
+          keypad.startDOF(e, 0);
+          message = "Element " + (active + 1) + " matrix auto-filled. Enter DOF mapping.";
+        } else {
+          keypad.mode = INPUT_NONE;
+          message = "Element " + (active + 1) + " matrix auto-filled.";
+        }
+        return;
+      }
+
+      if (over(610, btnY, 130, 40)) {
+        if (!e.matrixComplete()) {
+          message = "Complete matrix first.";
+          return;
+        }
+        e.autoFillDOF(gstN);
+        invalidateAssemblyState();
+        if (e.complete()) {
+          message = "Element " + (active + 1) + " DOF auto-filled.";
+          onElementCompleted(active);
+        } else {
+          message = "Element " + (active + 1) + " DOF auto-fill failed.";
+        }
+        return;
+      }
+
+      if (over(755, btnY, 140, 40)) {
+        if (!e.matrixComplete()) {
+          message = "Complete matrix first.";
+          return;
+        }
+        e.autoFillBandDOF(gstN, active + 1);
+        invalidateAssemblyState();
+        if (e.complete()) {
+          message = "Element " + (active + 1) + " band DOF auto-filled.";
+          onElementCompleted(active);
+        } else {
+          message = "Band DOF auto-fill failed.";
+        }
+        return;
+      }
+    }
+
+    if (keypad.mode != INPUT_NONE) {
+      if (keypad.mousePressed(this)) return;
+      return;
+    }
+
+    for (int i = 0; i < MAX_E; i++) {
+      float x = 20 + (i % 10) * 46;
+      float y = 70 + (i / 10) * 36;
+      if (over(x, y, 42, 30)) {
+        if (i < elementCount) {
+          active = i;
+          message = "Element " + (active + 1) + " selected.";
+        } else {
+          message = "This element is not active yet. Set element count first.";
+        }
+        return;
+      }
+    }
+
+    e = getActiveElement();
+    if (e == null) return;
+
+    if (e.size > 0) {
+      float cell = computeLocalCell(e);
+
+      for (int r = 0; r < e.size; r++) {
+        for (int c = 0; c < e.size; c++) {
+          float x = 40 + c * cell;
+          float y = 120 + r * cell;
+          if (over(x, y, cell, cell)) {
+            keypad.startMatrix(e, r, c);
+            message = "Enter matrix value for Element " + (active + 1) +
+              " cell (" + (r + 1) + "," + (c + 1) + ").";
+            return;
+          }
+        }
+      }
+
+      float dofY = 120 + e.size * cell + 45;
+      for (int i = 0; i < e.size; i++) {
+        float x = 40 + i * cell;
+        if (over(x, dofY, cell, cell)) {
+          keypad.startDOF(e, i);
+          message = "Enter global DOF number for position " + (i + 1) +
+            " of Element " + (active + 1) + ".";
+          return;
+        }
+      }
+    }
+  }
+
+  void handleDrag() {
+    keypad.drag();
+  }
+
+  void handleRelease() {
+    keypad.stopDrag();
+  }
+
+  void invalidateAssemblyState() {
+    settingFinished = false;
+    assembling = false;
+    assemblyActive = -1;
+    G.reset();
+    for (int i = 0; i < elementCount; i++) {
+      elements[i].resetAssemblyProgress();
+    }
+  }
+
+  void onGSTCommitted(int n) {
+    gstN = n;
+    gstSet = true;
+    settingFinished = false;
+    assembling = false;
+    elementCount = 0;
+    active = 0;
+    assemblyActive = -1;
+    G.setSize(n);
+    for (int i = 0; i < MAX_E; i++) {
+      elements[i].resetAll();
+    }
+    keypad.startElementCount();
+    message = "GST size set to " + n + "x" + n + ". Now enter number of elements (1-100).";
+  }
+
+  void onElementCountCommitted(int m) {
+    elementCount = m;
+    settingFinished = false;
+    assembling = false;
+    active = 0;
+    assemblyActive = -1;
+    G.reset();
+    for (int i = 0; i < MAX_E; i++) {
+      elements[i].resetAll();
+    }
+    if (elementCount > 0) {
+      active = 0;
+      keypad.startSize(elements[0]);
+      message = "Element count set to " + elementCount + ". Now enter size for Element 1.";
+    } else {
+      message = "Invalid element count.";
+    }
+  }
+
+  void onElementCompleted(int idx) {
+    if (idx < elementCount - 1) {
+      active = idx + 1;
+      keypad.startSize(elements[active]);
+      message = "Element " + (idx + 2) + " next. Enter its size.";
+    } else {
+      message = "All entered elements are complete. Click SETTING FINISH.";
+      keypad.mode = INPUT_NONE;
+    }
+  }
+
+  void stepAssembly() {
+    if (!settingFinished || elementCount == 0) {
+      assembling = false;
+      message = "SETTING NOT FINISHED.";
+      return;
+    }
+
+    for (int i = 0; i < elementCount; i++) {
+      int idx = (assemblyActive + 1 + i) % elementCount;
+      Element e = elements[idx];
+
+      if (e.readyForAssembly()) {
+        active = idx;
+        assemblyActive = idx;
+
+        if (e.stepOne(G)) {
+          G.setHighlight(e.lastGI, e.lastGJ, e.lastValue, idx);
+
+          message = "E" + (idx + 1) + " contributes to GST[" +
+            (e.lastGI + 1) + "," + (e.lastGJ + 1) + "] += " +
+            nf(e.lastValue, 0, 2);
+
+          if (e.done) {
+            message += " | E" + (idx + 1) + " assembly complete.";
+          }
+        } else {
+          message = "Assembly complete.";
+        }
+
+        if (allAssembled()) {
+          assembling = false;
+          message = "Assembly complete.";
+        }
+        return;
+      }
+    }
+
+    assembling = false;
+    message = "Assembly complete.";
+  }
+
+  boolean allAssembled() {
+    for (int i = 0; i < elementCount; i++) {
+      if (elements[i].readyForAssembly()) return false;
+    }
+    return true;
+  }
+
+  Element getActiveElement() {
+    if (elementCount <= 0) return null;
+    if (active < 0 || active >= elementCount) return null;
+    return elements[active];
+  }
+
+  boolean allReady() {
+    if (!gstSet) return false;
+    if (elementCount <= 0) return false;
+    for (int i = 0; i < elementCount; i++) {
+      if (!elements[i].complete()) return false;
+    }
+    return true;
+  }
+
+  float computeLocalCell(Element e) {
+    if (e == null || e.size <= 0) return 40;
+    float n = max(1, e.size);
+    float availableW = width * 0.38 - 60;
+    float availableH = height * 0.36 - 150;
+    float s = min(40, min(availableW / n, availableH / n));
+    return constrain(s, 4, 40);
+  }
+
+  float computeGlobalCell() {
+    if (!gstSet || G.N <= 0) return 25;
+    float n = max(1, G.N);
+    float availableW = width * 0.38 - 20;
+    float availableH = height * 0.55 - 120;
+    float s = min(28, min(availableW / n, availableH / n));
+    return constrain(s, 3, 28);
+  }
+
+  void drawTop() {
+    fill(0);
+    textSize(18);
+    text("FEM GST VISUALIZER", width / 2, 28);
+
+    fill(0);
+    textSize(13);
+    String topInfo = "GST: " + (gstSet ? str(gstN) : "-") +
+      "   Elements: " + (elementCount > 0 ? str(elementCount) : "-") +
+      "   Status: " + (settingFinished ? "READY" : "EDITING");
+    text(topInfo, width / 2, 50);
+
+    fill(gstSet ? color(180, 240, 180) : color(255, 220, 120));
+    stroke(0);
+    rect(width - 190, 20, 170, 40, 8);
+    fill(0);
+    textSize(15);
+    text(gstSet ? ("GST " + gstN + "x" + gstN) : "SET GST", width - 105, 40);
+    textSize(14);
+  }
+
+  void drawSelector() {
+    for (int i = 0; i < MAX_E; i++) {
+      float x = 20 + (i % 10) * 46;
+      float y = 70 + (i / 10) * 36;
+      int col;
+      String label = str(i + 1);
+
+      if (i >= elementCount) {
+        col = color(205);
+      } else if (assembling && i == assemblyActive) {
+        col = color(255, 200, 120);
+      } else if (i == active) {
+        col = color(180, 220, 255);
+      } else if (elements[i].complete()) {
+        col = color(180, 240, 180);
+      } else if (elements[i].size > 0) {
+        col = color(230);
+      } else {
+        col = color(210);
+      }
+
+      fill(col);
+      stroke(0);
+      rect(x, y, 42, 30, 6);
+      fill(0);
+      textSize(12);
+      text(label, x + 21, y + 15);
+    }
+    textSize(14);
+  }
+
+  void drawStageLabel(Element e) {
+    fill(0);
+    textSize(16);
+    String s = "No element selected";
+    if (!gstSet) {
+      s = "Set GST size first";
+    } else if (e == null) {
+      s = "Select an element";
+    } else if (e.size == 0) {
+      s = "Element " + (active + 1) + " : SIZE ENTRY";
+    } else if (!e.matrixComplete()) {
+      s = "Element " + (active + 1) + " : MATRIX ENTRY";
+    } else if (!e.dofComplete()) {
+      s = "Element " + (active + 1) + " : DOF ENTRY";
+    } else {
+      s = "Element " + (active + 1) + " : READY";
+    }
+    text(s, 180, 90);
+    textSize(14);
+  }
+
+  void drawEmptyLocalArea() {
+    fill(0);
+    textSize(16);
+    text(gstSet ? "Select an element and enter its SIZE" : "Set GST size first", 180, 190);
+    textSize(14);
+  }
+
+  void drawButtons() {
+    btnY = height - 210;
+    Element e = getActiveElement();
+
+    drawBtn(40, btnY, 100, 40, "SIZE", gstSet && e != null);
+    drawBtn(155, btnY, 150, 40, "SETTING FINISH", allReady());
+    drawBtn(320, btnY, 110, 40, "ASSEMBLE", settingFinished);
+
+    if (e != null && e.size > 0) {
+      drawBtn(445, btnY, 150, 40, "AUTO FILL MATRIX", true);
+      drawBtn(610, btnY, 130, 40, "AUTO FILL DOF", e.matrixComplete());
+      drawBtn(755, btnY, 140, 40, "AUTO BAND DOF", e.matrixComplete());
+    } else {
+      drawBtn(445, btnY, 150, 40, "AUTO FILL MATRIX", false);
+      drawBtn(610, btnY, 130, 40, "AUTO FILL DOF", false);
+      drawBtn(755, btnY, 140, 40, "AUTO BAND DOF", false);
+    }
+  }
+
+  void drawBtn(float x, float y, float w, float h, String t, boolean enabled) {
+    stroke(0);
+    fill(enabled ? 220 : 235);
+    rect(x, y, w, h, 8);
+    fill(enabled ? 0 : 130);
+    textSize(13);
+    text(t, x + w / 2, y + h / 2);
+    textSize(14);
+  }
+
+  void drawStatus() {
+    fill(255);
+    stroke(0);
+    rect(20, height - 250, width - 40, 34, 8);
+    fill(0);
+    textSize(14);
+    text(message, width / 2, height - 233);
+  }
+
+  void autoBandDOFActive() {
+    Element e = getActiveElement();
+    if (e == null || e.size <= 0) {
+      message = "Set element size first.";
+      return;
+    }
+    if (!e.matrixComplete()) {
+      message = "Complete matrix first.";
+      return;
+    }
+    e.autoFillBandDOF(gstN, active + 1);
+    invalidateAssemblyState();
+    if (e.complete()) {
+      message = "Element " + (active + 1) + " band DOF auto-filled.";
+      onElementCompleted(active);
+    } else {
+      message = "Band DOF auto-fill failed.";
+    }
+  }
+}
+
+class GlobalMatrix {
+  int N = 0;
+  float[][] K;
+  int[][] hit;
+
+  int hiI = -1;
+  int hiJ = -1;
+  int hiElement = -1;
+  float hiVal = 0;
+
+  GlobalMatrix(int max) {
+    K = new float[max][max];
+    hit = new int[max][max];
+  }
+
+  void setSize(int n) {
+    N = n;
+    reset();
+  }
+
+  void reset() {
+    for (int i = 0; i < K.length; i++) {
+      for (int j = 0; j < K.length; j++) {
+        K[i][j] = 0;
+        hit[i][j] = 0;
+      }
+    }
+    clearHighlight();
+  }
+
+  void clearHighlight() {
+    hiI = -1;
+    hiJ = -1;
+    hiElement = -1;
+    hiVal = 0;
+  }
+
+  void setHighlight(int I, int J, float v, int elem) {
+    hiI = I;
+    hiJ = J;
+    hiVal = v;
+    hiElement = elem;
+  }
+
+  void add(int I, int J, float val) {
+    if (I >= 0 && J >= 0 && I < N && J < N) {
+      K[I][J] += val;
+      hit[I][J]++;
+    }
+  }
+
+  void draw(float x, float y, float cell) {
+    pushStyle();
+    textAlign(CENTER, CENTER);
+
+    fill(0);
+    textSize(16);
+    text("GLOBAL GST (" + N + "x" + N + ")", x + 120, y - 35);
+
+    float tSize = max(6, cell * 0.30);
+    textSize(tSize);
+
+    for (int r = 0; r < N; r++) {
+      for (int c = 0; c < N; c++) {
+        boolean hi = (r == hiI && c == hiJ);
+
+        if (hi) {
+          fill(255, 170, 170);
+        } else if (hit[r][c] > 0) {
+          fill(200, 180, 120);
+        } else {
+          fill(255);
+        }
+
+        stroke(0);
+        rect(x + c * cell, y + r * cell, cell, cell);
+
+        fill(0);
+        String txt = "";
+        if (cell >= 8 || hit[r][c] > 0) {
+          txt = nf(K[r][c], 0, 2);
+        }
+        text(txt, x + c * cell + cell / 2, y + r * cell + cell / 2);
+      }
+    }
+
+    if (hiI >= 0 && hiJ >= 0) {
+      fill(0);
+      textSize(12);
+      text("E" + (hiElement + 1) + " → GST[" + (hiI + 1) + "," + (hiJ + 1) + "] = " + nf(hiVal, 0, 2),
+        x + 120, y + N * cell + 22);
+    }
+
+    popStyle();
+  }
+}
+
+class Element {
+  int size = 0;
+
+  float[][] ke;
+  boolean[][] keSet;
+
+  int[] dof;
+  boolean[] dofSet;
+
+  int asmR = 0;
+  int asmC = 0;
+  boolean done = false;
+
+  int lastR = -1;
+  int lastC = -1;
+  int lastGI = -1;
+  int lastGJ = -1;
+  float lastValue = 0;
+
+  void init(int n) {
+    size = n;
+    ke = new float[n][n];
+    keSet = new boolean[n][n];
+    dof = new int[n];
+    dofSet = new boolean[n];
+
+    for (int i = 0; i < n; i++) {
+      dof[i] = 0;
+      dofSet[i] = false;
+    }
+
+    for (int r = 0; r < n; r++) {
+      for (int c = 0; c < n; c++) {
+        ke[r][c] = 0;
+        keSet[r][c] = false;
+      }
+    }
+
+    resetAssemblyProgress();
+  }
+
+  void resetAll() {
+    size = 0;
+    ke = null;
+    keSet = null;
+    dof = null;
+    dofSet = null;
+    resetAssemblyProgress();
+  }
+
+  void resetAssemblyProgress() {
+    asmR = 0;
+    asmC = 0;
+    done = false;
+    lastR = -1;
+    lastC = -1;
+    lastGI = -1;
+    lastGJ = -1;
+    lastValue = 0;
+  }
+
+  void autoFillMatrix() {
+    if (size <= 0 || ke == null || keSet == null) return;
+    for (int r = 0; r < size; r++) {
+      for (int c = 0; c < size; c++) {
+        ke[r][c] = int(random(-1000, 1001));
+        keSet[r][c] = true;
+      }
+    }
+    resetAssemblyProgress();
+  }
+
+  void autoFillDOF(int gstN) {
+    if (size <= 0 || dof == null || dofSet == null) return;
+    if (gstN < size) return;
+
+    int[] pool = new int[gstN];
+    for (int i = 0; i < gstN; i++) pool[i] = i + 1;
+
+    for (int i = gstN - 1; i > 0; i--) {
+      int j = int(random(i + 1));
+      int temp = pool[i];
+      pool[i] = pool[j];
+      pool[j] = temp;
+    }
+
+    for (int i = 0; i < size; i++) {
+      dof[i] = pool[i] - 1;
+      dofSet[i] = true;
+    }
+
+    resetAssemblyProgress();
+  }
+
+  void autoFillBandDOF(int gstN, int startDOF) {
+    if (size <= 0 || dof == null || dofSet == null) return;
+    if (gstN < size) return;
+
+    int start = startDOF;
+    if (start < 1) start = 1;
+    int maxStart = gstN - size + 1;
+    if (start > maxStart) start = maxStart;
+
+    for (int i = 0; i < size; i++) {
+      dof[i] = (start - 1) + i;
+      dofSet[i] = true;
+    }
+
+    resetAssemblyProgress();
+  }
+
+  int[] firstUnsetMatrix() {
+    int[] out = {0, 0};
+    if (size <= 0 || keSet == null) return out;
+    for (int r = 0; r < size; r++) {
+      for (int c = 0; c < size; c++) {
+        if (!keSet[r][c]) {
+          out[0] = r;
+          out[1] = c;
+          return out;
+        }
+      }
+    }
+    return out;
+  }
+
+  int firstUnsetDOF() {
+    if (size <= 0 || dofSet == null) return 0;
+    for (int i = 0; i < size; i++) {
+      if (!dofSet[i]) return i;
+    }
+    return 0;
+  }
+
+  boolean matrixComplete() {
+    if (size == 0 || keSet == null) return false;
+    for (int r = 0; r < size; r++) {
+      for (int c = 0; c < size; c++) {
+        if (!keSet[r][c]) return false;
+      }
+    }
+    return true;
+  }
+
+  boolean dofComplete() {
+    if (size == 0 || dofSet == null) return false;
+    for (int i = 0; i < size; i++) {
+      if (!dofSet[i]) return false;
+    }
+    return true;
+  }
+
+  boolean complete() {
+    return size > 0 && matrixComplete() && dofComplete();
+  }
+
+  boolean readyForAssembly() {
+    return complete() && !done;
+  }
+
+  boolean stepOne(GlobalMatrix G) {
+    if (!readyForAssembly()) return false;
+
+    lastR = asmR;
+    lastC = asmC;
+    lastGI = dof[asmR];
+    lastGJ = dof[asmC];
+    lastValue = ke[asmR][asmC];
+
+    G.add(lastGI, lastGJ, lastValue);
+
+    asmC++;
+    if (asmC >= size) {
+      asmC = 0;
+      asmR++;
+    }
+
+    if (asmR >= size) {
+      done = true;
+    }
+
+    return true;
+  }
+
+  void drawLocal(float x, float y, float cell, Keypad keypad, boolean assemblyHighlight) {
+    if (size == 0) return;
+
+    pushStyle();
+    textAlign(CENTER, CENTER);
+
+    fill(0);
+    textSize(16);
+    text("ELEMENT " + (app.active + 1) + " LOCAL MATRIX", x + 160, y - 35);
+
+    float tSize = max(7, cell * 0.35);
+    textSize(tSize);
+
+    for (int r = 0; r < size; r++) {
+      for (int c = 0; c < size; c++) {
+        boolean selected = (keypad.mode == INPUT_MATRIX &&
+          keypad.el == this &&
+          keypad.r == r && keypad.c == c);
+
+        boolean asmCell = (assemblyHighlight && r == lastR && c == lastC);
+
+        if (asmCell) {
+          fill(255, 170, 170);
+        } else if (selected) {
+          fill(255, 225, 150);
+        } else if (keSet[r][c]) {
+          fill(235);
+        } else {
+          fill(255);
+        }
+
+        stroke(0);
+        rect(x + c * cell, y + r * cell, cell, cell);
+
+        fill(0);
+        String txt = "";
+        if (keSet[r][c]) txt = nf(ke[r][c], 0, 2);
+        if (selected && keypad.val.length() > 0) txt = keypad.val;
+        text(txt, x + c * cell + cell / 2, y + r * cell + cell / 2);
+      }
+    }
+
+    popStyle();
+  }
+
+  void drawDOF(float x, float y, float cell, Keypad keypad, boolean assemblyHighlight) {
+    if (size == 0) return;
+
+    pushStyle();
+    textAlign(CENTER, CENTER);
+
+    fill(0);
+    textSize(16);
+    text("DOF MAPPING", x + 120, y - 22);
+
+    float tSize = max(7, cell * 0.35);
+    textSize(tSize);
+
+    for (int i = 0; i < size; i++) {
+      boolean selected = (keypad.mode == INPUT_DOF &&
+        keypad.el == this &&
+        keypad.index == i);
+
+      boolean asmDOF = (assemblyHighlight && (i == lastR || i == lastC));
+
+      if (asmDOF) {
+        fill(255, 170, 170);
+      } else if (selected) {
+        fill(255, 225, 150);
+      } else if (dofSet[i]) {
+        fill(235);
+      } else {
+        fill(255);
+      }
+
+      stroke(0);
+      rect(x + i * cell, y, cell, cell);
+
+      fill(0);
+      String txt = "";
+      if (dofSet[i]) txt = "g" + (dof[i] + 1);
+      if (selected && keypad.val.length() > 0) txt = keypad.val;
+      text(txt, x + i * cell + cell / 2, y + cell / 2);
+    }
+
+    popStyle();
+  }
+}
+
+class Keypad {
+  String val = "";
+  int mode = INPUT_NONE;
+
+  Element el;
+  int r = 0;
+  int c = 0;
+  int index = 0;
+
+  float x = 200;
+  float y = 200;
+
+  boolean dragging = false;
+  float offX = 0;
+  float offY = 0;
+
+  String[] keys = {
+    "7","8","9",
+    "4","5","6",
+    "1","2","3",
+    "0",".","-",
+    "⌫","C","OK"
+  };
+
+  void startGST() {
+    mode = INPUT_GST;
+    val = "";
+    el = null;
+  }
+
+  void startElementCount() {
+    mode = INPUT_ECOUNT;
+    val = "";
+    el = null;
+  }
+
+  void startSize(Element e) {
+    mode = INPUT_SIZE;
+    el = e;
+    val = (e != null && e.size > 0) ? str(e.size) : "";
+  }
+
+  void startMatrix(Element e, int rr, int cc) {
+    mode = INPUT_MATRIX;
+    el = e;
+    r = rr;
+    c = cc;
+    if (e != null && e.keSet != null && rr >= 0 && rr < e.size && cc >= 0 && cc < e.size && e.keSet[rr][cc]) {
+      val = nf(e.ke[rr][cc], 0, 6);
+    } else {
+      val = "";
+    }
+  }
+
+  void startDOF(Element e, int i) {
+    mode = INPUT_DOF;
+    el = e;
+    index = i;
+    if (e != null && e.dofSet != null && i >= 0 && i < e.size && e.dofSet[i]) {
+      val = str(e.dof[i] + 1);
+    } else {
+      val = "";
+    }
+  }
+
+  String label() {
+    if (mode == INPUT_GST) return "GST SIZE";
+    if (mode == INPUT_ECOUNT) return "NUMBER OF ELEMENTS";
+    if (mode == INPUT_SIZE) return "ELEMENT SIZE";
+    if (mode == INPUT_MATRIX) return "MATRIX VALUE (r=" + (r + 1) + ", c=" + (c + 1) + ")";
+    if (mode == INPUT_DOF) return "GLOBAL DOF NUMBER (position " + (index + 1) + ")";
+    return "";
+  }
+
+  void draw() {
+    if (mode == INPUT_NONE) return;
+
+    float panelW = 340;
+    float panelH = 320;
+    float keyW = 50;
+    float keyH = 50;
+
+    fill(255);
+    stroke(0);
+    rect(x, y, panelW, panelH, 10);
+
+    fill(245);
+    stroke(0);
+    rect(x, y, panelW, 40, 10, 10, 0, 0);
+
+    fill(0);
+    textSize(13);
+    text(label(), x + panelW / 2, y + 20);
+
+    int k = 0;
+    for (int i = 0; i < 5; i++) {
+      for (int j = 0; j < 3; j++) {
+        float bx = x + 10 + j * 60;
+        float by = y + 50 + i * 52;
+
+        fill(220);
+        stroke(0);
+        rect(bx, by, keyW, keyH, 6);
+
+        fill(0);
+        textSize(14);
+        text(keys[k], bx + keyW / 2, by + keyH / 2);
+        k++;
+      }
+    }
+
+    fill(255);
+    stroke(0);
+    rect(x + 10, y + panelH - 45, panelW - 20, 35, 8);
+
+    fill(val.length() > 0 ? 0 : 150);
+    textSize(14);
+    String shown = val.length() > 0 ? val : "Enter value and press OK";
+    text(shown, x + panelW / 2, y + panelH - 27);
+  }
+
+  boolean mousePressed(App app) {
+    if (mode == INPUT_NONE) return false;
+
+    float panelW = 340;
+    float panelH = 320;
+    float keyW = 50;
+    float keyH = 50;
+
+    if (over(x, y, panelW, 40)) {
+      dragging = true;
+      offX = mouseX - x;
+      offY = mouseY - y;
+      return true;
+    }
+
+    int k = 0;
+    for (int i = 0; i < 5; i++) {
+      for (int j = 0; j < 3; j++) {
+        float bx = x + 10 + j * 60;
+        float by = y + 50 + i * 52;
+
+        if (over(bx, by, keyW, keyH)) {
+          pressKey(keys[k], app);
+          return true;
+        }
+        k++;
+      }
+    }
+
+    if (over(x, y, panelW, panelH)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  void pressKey(String key, App app) {
+    if (key.equals("C")) {
+      val = "";
+    } else if (key.equals("⌫")) {
+      if (val.length() > 0) val = val.substring(0, val.length() - 1);
+    } else if (key.equals("OK")) {
+      commit(app);
+    } else {
+      if (mode == INPUT_GST || mode == INPUT_ECOUNT || mode == INPUT_SIZE || mode == INPUT_DOF) {
+        if (Character.isDigit(key.charAt(0))) val += key;
+      } else if (mode == INPUT_MATRIX) {
+        if (Character.isDigit(key.charAt(0)) || key.equals(".") || key.equals("-")) {
+          val += key;
+        }
+      }
+    }
+  }
+
+  void drag() {
+    if (dragging) {
+      x = mouseX - offX;
+      y = mouseY - offY;
+    }
+  }
+
+  void stopDrag() {
+    dragging = false;
+  }
+
+  void commit(App app) {
+    if (val.length() == 0) {
+      app.message = "Empty input.";
+      return;
+    }
+
+    if (mode == INPUT_GST) {
+      if (!isPositiveIntString(val)) {
+        app.message = "Invalid GST size.";
+        val = "";
+        return;
+      }
+
+      int n = int(val);
+      if (n < 1 || n > MAX_G) {
+        app.message = "GST size must be 1 to " + MAX_G + ".";
+        val = "";
+        return;
+      }
+
+      app.onGSTCommitted(n);
+    }
+    else if (mode == INPUT_ECOUNT) {
+      if (!isPositiveIntString(val)) {
+        app.message = "Invalid element count.";
+        val = "";
+        return;
+      }
+
+      int m = int(val);
+      if (m < 1 || m > MAX_E) {
+        app.message = "Element count must be 1 to " + MAX_E + ".";
+        val = "";
+        return;
+      }
+
+      app.onElementCountCommitted(m);
+    }
+    else if (mode == INPUT_SIZE) {
+      if (!isPositiveIntString(val)) {
+        app.message = "Invalid element size.";
+        val = "";
+        return;
+      }
+
+      int n = int(val);
+      if (n < 1 || n > app.gstN) {
+        app.message = "Element size must be 1 to GST size " + app.gstN + ".";
+        val = "";
+        return;
+      }
+
+      el.init(n);
+      app.invalidateAssemblyState();
+      app.message = "Element " + (app.active + 1) + " size set. Enter matrix values.";
+      startMatrix(el, 0, 0);
+    }
+    else if (mode == INPUT_MATRIX) {
+      if (!isFloatString(val)) {
+        app.message = "Invalid matrix value.";
+        val = "";
+        return;
+      }
+
+      el.ke[r][c] = float(val);
+      el.keSet[r][c] = true;
+      app.invalidateAssemblyState();
+
+      int nextIndex = r * el.size + c + 1;
+      int total = el.size * el.size;
+
+      if (nextIndex < total) {
+        int nr = nextIndex / el.size;
+        int nc = nextIndex % el.size;
+        startMatrix(el, nr, nc);
+      } else {
+        app.message = "Matrix entry finished for Element " + (app.active + 1) + ". Enter DOF mapping.";
+        startDOF(el, 0);
+      }
+    }
+    else if (mode == INPUT_DOF) {
+      if (!isPositiveIntString(val)) {
+        app.message = "Invalid DOF number.";
+        val = "";
+        return;
+      }
+
+      int v = int(val);
+      if (v < 1 || v > app.gstN) {
+        app.message = "DOF must be 1 to " + app.gstN + ".";
+        val = "";
+        return;
+      }
+
+      el.dof[index] = v - 1;
+      el.dofSet[index] = true;
+      app.invalidateAssemblyState();
+
+      int next = index + 1;
+      if (next < el.size) {
+        startDOF(el, next);
+      } else {
+        app.message = "Element " + (app.active + 1) + " complete.";
+        el.resetAssemblyProgress();
+        mode = INPUT_NONE;
+        app.onElementCompleted(app.active);
+      }
+    }
+
+    val = "";
+  }
+}
